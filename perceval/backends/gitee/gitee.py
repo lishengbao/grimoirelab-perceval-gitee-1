@@ -40,6 +40,10 @@ from ...utils import DEFAULT_DATETIME, DEFAULT_LAST_DATETIME
 CATEGORY_ISSUE = "issue"
 CATEGORY_PULL_REQUEST = "pull_request"
 CATEGORY_REPO = 'repository'
+CATEGORY_EVENT = "event"
+CATEGORY_STARGAZER = "stargazer"
+CATEGORY_FORK = "fork"
+CATEGORY_WATCH = "watch"
 
 GITEE_URL = "https://gitee.com/"
 GITEE_API_URL = "https://gitee.com/api/v5"
@@ -99,7 +103,8 @@ class Gitee(Backend):
     """
     version = '0.1.0'
 
-    CATEGORIES = [CATEGORY_ISSUE, CATEGORY_PULL_REQUEST, CATEGORY_REPO]
+    CATEGORIES = [CATEGORY_ISSUE, CATEGORY_PULL_REQUEST, CATEGORY_REPO, 
+                  CATEGORY_EVENT, CATEGORY_STARGAZER, CATEGORY_FORK, CATEGORY_WATCH]
 
     CLASSIFIED_FIELDS = [
         ['user_data'],
@@ -205,13 +210,20 @@ class Gitee(Backend):
         from_date = kwargs['from_date']
         to_date = kwargs['to_date']
 
-        if category == CATEGORY_ISSUE:
-            items = self.__fetch_issues(from_date, to_date)
-        elif category == CATEGORY_PULL_REQUEST:
-            items = self.__fetch_pull_requests(from_date, to_date)
+        fetch_category_switch = {
+            CATEGORY_ISSUE: lambda: self.__fetch_issues(from_date, to_date),
+            CATEGORY_PULL_REQUEST: lambda: self.__fetch_pull_requests(from_date, to_date),
+            CATEGORY_REPO: lambda: self.__fetch_repo_info(),
+            CATEGORY_EVENT: lambda: self.__fetch_events(from_date, to_date),
+            CATEGORY_STARGAZER: lambda: self.__fetch_stargazers(to_date),
+            CATEGORY_FORK: lambda: self.__fetch_forks(to_date),
+            CATEGORY_WATCH: lambda: self.__fetch_watchs(to_date)
+        }
+        if category in fetch_category_switch:
+            items = fetch_category_switch[category]()
         else:
-            items = self.__fetch_repo_info()
-
+            logger.error("[github] fetch item not defined for GitHub category {}".format(
+                         category))
         return items
 
     @classmethod
@@ -234,7 +246,7 @@ class Gitee(Backend):
     def metadata_id(item):
         """Extracts the identifier from a Gitee item."""
 
-        if "forks_count" in item:
+        if "fetched_on" in item:
             return str(item['fetched_on'])
         else:
             return str(item['id'])
@@ -251,26 +263,39 @@ class Gitee(Backend):
 
         :returns: a UNIX timestamp
         """
-        if "forks_count" in item:
+        if "fetched_on" in item:
             return item['fetched_on']
+        elif "star_at" in item:
+            ts = item['star_at']
+        elif "forks_count" in item and "fetched_on" not in item:
+            ts = item['created_at']
+        elif "watch_at" in item:
+            ts = item['watch_at']
         else:
             ts = item['updated_at']
-            ts = str_to_datetime(ts)
 
-            return ts.timestamp()
+        ts = str_to_datetime(ts)
+        return ts.timestamp()
+
 
     @staticmethod
     def metadata_category(item):
         """Extracts the category from a Gitee item.
 
         This backend generates three types of item which are
-        'issue', 'pull_request' and 'repo' information.
+        'issue', 'pull_request' , 'stargazer', 'fork', 'watch' and 'repo' information.
         """
 
         if "base" in item:
             category = CATEGORY_PULL_REQUEST
-        elif "forks_count" in item:
+        elif "fetched_on" in item:
             category = CATEGORY_REPO
+        elif "star_at" in item:
+            category = CATEGORY_STARGAZER
+        elif "forks_count" in item and "fetched_on" not in item:
+            category = CATEGORY_FORK
+        elif "watch_at" in item:
+            category = CATEGORY_WATCH
         else:
             category = CATEGORY_ISSUE
 
@@ -343,6 +368,43 @@ class Gitee(Backend):
                             pull['merged_by_data'] = self.__get_user(pull['merged_by'])
                         pull['linked_issues'] = self.__get_pull_linked_issues(pull['number'])
                 yield pull
+
+    def __fetch_events(self, from_date, to_date):
+        """ Fetch the events declared at EVENT_TYPES for issues (including pull requests) """
+        pass
+
+    def __fetch_stargazers(self, to_date):
+        """Fetch the stargazers"""
+        raw_stargazers_groups = self.client.stargazers()
+        for raw_stargazers in raw_stargazers_groups:
+            stargazers = json.loads(raw_stargazers)
+            for stargazer in stargazers:
+
+                if str_to_datetime(stargazer['star_at']) > to_date:
+                    return
+                yield stargazer
+
+    def __fetch_forks(self, to_date):
+        """Fetch the forks"""
+        raw_forks_groups = self.client.forks()
+        for raw_forks in raw_forks_groups:
+            forks = json.loads(raw_forks)
+            for fork in forks:
+
+                if str_to_datetime(fork['created_at']) > to_date:
+                    return
+                yield fork
+
+    def __fetch_watchs(self, to_date):
+        """Fetch the watchs"""
+        raw_watchs_groups = self.client.watchs()
+        for raw_watchs in raw_watchs_groups:
+            watchs = json.loads(raw_watchs)
+            for watch in watchs:
+
+                if str_to_datetime(watch['watch_at']) > to_date:
+                    return
+                yield watch
 
     def __fetch_repo_info(self):
         """Get repo info about stars, watchers and forks"""
@@ -614,7 +676,35 @@ class GiteeClient(HttpClient, RateLimitHandler):
 
         path = urijoin("issues")
         return self.fetch_items(path, payload)
+    
+    def stargazers(self):
+        """ Fetch the stargazers from the repository. """
+        payload = {
+            'per_page': self.max_items
+        }
 
+        path = urijoin("stargazers")
+        return self.fetch_items(path, payload)
+
+    def forks(self):
+        """ Fetch the forks from the repository. """
+        payload = {
+            'per_page': self.max_items,
+            'sort': 'oldest'
+        }
+
+        path = urijoin("forks")
+        return self.fetch_items(path, payload)
+
+    def watchs(self):
+        """ Fetch the subscribers from the repository. """
+        payload = {
+            'per_page': self.max_items
+        }
+
+        path = urijoin("subscribers")
+        return self.fetch_items(path, payload)
+     
     def pulls(self, from_date=None):
         """Fetch the pull requests from the repository.
 
