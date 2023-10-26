@@ -271,6 +271,8 @@ class Gitee(Backend):
             ts = item['created_at']
         elif "watch_at" in item:
             ts = item['watch_at']
+        elif "action_type" in item:
+            ts = item['created_at']
         else:
             ts = item['updated_at']
 
@@ -296,6 +298,8 @@ class Gitee(Backend):
             category = CATEGORY_FORK
         elif "watch_at" in item:
             category = CATEGORY_WATCH
+        elif "action_type" in item:
+            category = CATEGORY_EVENT
         else:
             category = CATEGORY_ISSUE
 
@@ -370,8 +374,37 @@ class Gitee(Backend):
                 yield pull
 
     def __fetch_events(self, from_date, to_date):
-        """ Fetch the events declared at EVENT_TYPES for issues (including pull requests) """
-        pass
+        """ Fetch the events for issues and pull requests """
+        issues_groups = self.client.issues(from_date=from_date)
+        for raw_issues in issues_groups:
+            issues = json.loads(raw_issues)
+            for issue in issues:
+                issue_number = issue['number']
+                issue_operate_logs_groups = self.client.issue_operate_logs(issue_number)
+                for operate_logs_raw in issue_operate_logs_groups:
+                    operate_logs = json.loads(operate_logs_raw)
+                    for operate_log in operate_logs:
+                        if str_to_datetime(operate_log['created_at']) > to_date:
+                            return
+
+                        operate_log['issue'] = issue
+                        yield operate_log
+
+        raw_pulls_groups = self.client.pulls(from_date=from_date)
+        for raw_pulls in raw_pulls_groups:
+            pulls = json.loads(raw_pulls)
+            for pull in pulls:
+                pull_number = pull['number']
+                pull_operate_logs_groups = self.client.pull_operate_logs(pull_number)
+                for operate_logs_raw in pull_operate_logs_groups:
+                    operate_logs = json.loads(operate_logs_raw)
+                    for operate_log in operate_logs:
+    
+                        if str_to_datetime(operate_log['created_at']) > to_date:
+                            return
+
+                        operate_log['pull'] = pull
+                        yield operate_log
 
     def __fetch_stargazers(self, to_date):
         """Fetch the stargazers"""
@@ -682,6 +715,18 @@ class GiteeClient(HttpClient, RateLimitHandler):
         path = urijoin("issues")
         return self.fetch_items(path, payload)
     
+    def issue_operate_logs(self, issue_number):
+        """Fetch the issue operate_logs from the repository.
+        """
+        payload = {
+            "repo": self.repository,
+            'sort': 'asc'
+        }
+        path = urijoin(f"issues/{str(issue_number)}/operate_logs")
+        url_next = urijoin(self.base_url, 'repos', self.owner, path)
+        return self.fetch_items(path, payload, url_next)
+
+    
     def stargazers(self):
         """ Fetch the stargazers from the repository. """
         payload = {
@@ -731,6 +776,15 @@ class GiteeClient(HttpClient, RateLimitHandler):
             payload['since'] = from_date.isoformat()
 
         path = urijoin("pulls")
+        return self.fetch_items(path, payload)
+    
+    def pull_operate_logs(self, pull_number):
+        """Fetch the pull operate_logs from the repository.
+        """
+        payload = {
+            'sort': 'asc'
+        }
+        path = urijoin(f"pulls/{str(pull_number)}/operate_logs")
         return self.fetch_items(path, payload)
 
     def repo(self):
@@ -860,12 +914,13 @@ class GiteeClient(HttpClient, RateLimitHandler):
 
         return response
 
-    def fetch_items(self, path, payload):
+    def fetch_items(self, path, payload, url_next=None):
         """Return the items from gitee API using links pagination"""
 
         page = 0  # current page
         total_page = None  # total page number
-        url_next = urijoin(self.base_url, 'repos', self.owner, self.repository, path)
+        if url_next is None:
+            url_next = urijoin(self.base_url, 'repos', self.owner, self.repository, path)
         logger.debug("Get Gitee paginated items from " + url_next)
 
         response = self.fetch(url_next, payload=payload)
